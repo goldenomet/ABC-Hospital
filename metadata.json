@@ -1,0 +1,6 @@
+{
+  "name": "ABC Hospital Bot",
+  "description": "A professional chatbot for ABC Hospital in Nigeria that assists patients with appointment scheduling and provides basic medical information.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
