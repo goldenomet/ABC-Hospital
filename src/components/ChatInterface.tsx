@@ -20,7 +20,12 @@ import {
   CheckCircle2,
   ExternalLink,
   Lock,
-  Star
+  Star,
+  Printer,
+  Search,
+  Inbox,
+  ChevronRight,
+  X
 } from 'lucide-react';
 import { ChatMessage, type Message } from './ChatMessage';
 import { 
@@ -29,7 +34,10 @@ import {
   logout, 
   syncPatientLeadToSheets, 
   sendEmailViaGmail,
-  type LeadDetails 
+  listRecentEmails,
+  getEmailDetail,
+  type LeadDetails,
+  type GmailMessage
 } from '../lib/firebase';
 import { type User as FirebaseUser } from 'firebase/auth';
 
@@ -97,6 +105,54 @@ export function ChatInterface({
   const [gmailBody, setGmailBody] = useState('');
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [gmailResult, setGmailResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  // Live Gmail Inbox State
+  const [gmailSubTab, setGmailSubTab] = useState<'send' | 'inbox'>('send');
+  const [emailsList, setEmailsList] = useState<GmailMessage[]>([]);
+  const [isFetchingEmails, setIsFetchingEmails] = useState(false);
+  const [emailsSearchQuery, setEmailsSearchQuery] = useState('');
+  const [selectedEmailDetail, setSelectedEmailDetail] = useState<{ id: string; body: string; subject?: string } | null>(null);
+  const [isFetchingEmailDetail, setIsFetchingEmailDetail] = useState(false);
+
+  // Inquiry Closure & Automation States
+  const [isInquiryClosed, setIsInquiryClosed] = useState(false);
+  const [showClosureConfirmModal, setShowClosureConfirmModal] = useState(false);
+  const [hasNotifiedDeveloperOfChatInquiry, setHasNotifiedDeveloperOfChatInquiry] = useState(false);
+  const [isAutomatingClosure, setIsAutomatingClosure] = useState(false);
+  const [closureAutomationResult, setClosureAutomationResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const fetchRecentEmails = async (query = '') => {
+    setIsFetchingEmails(true);
+    try {
+      const msgs = await listRecentEmails(query, 5);
+      setEmailsList(msgs);
+    } catch (err: any) {
+      console.error('Failed to fetch emails:', err);
+    } finally {
+      setIsFetchingEmails(false);
+    }
+  };
+
+  const loadEmailDetail = async (id: string) => {
+    setIsFetchingEmailDetail(true);
+    try {
+      const detail = await getEmailDetail(id);
+      setSelectedEmailDetail(detail);
+    } catch (err: any) {
+      console.error('Failed to load email details:', err);
+    } finally {
+      setIsFetchingEmailDetail(false);
+    }
+  };
+
+  // Fetch emails automatically when token is available
+  useEffect(() => {
+    if (token) {
+      fetchRecentEmails(emailsSearchQuery);
+    } else {
+      setEmailsList([]);
+    }
+  }, [token]);
 
   // Assistant Star Feedback State
   const [starRating, setStarRating] = useState<number | null>(null);
@@ -194,6 +250,307 @@ export function ChatInterface({
     }
   };
 
+  const sendEmailWithChatHistory = async (
+    subject: string, 
+    introHtml: string, 
+    customMessages?: Message[]
+  ) => {
+    if (!user || !token) {
+      console.log('No active Google session to send email in the background.');
+      return;
+    }
+
+    const msgsToUse = customMessages || messages;
+    
+    const chatHtml = msgsToUse.map(m => {
+      const isUser = m.role === 'user';
+      const roleName = isUser ? 'Patient' : 'Hospital Virtual Assistant';
+      const roleColor = isUser ? '#1e293b' : '#008080';
+      const bgColor = isUser ? '#f1f5f9' : '#f0fdfa';
+      const textVal = m.text || (m.audio ? '[Voice Note / Audio Message]' : '');
+      return `
+        <div style="margin-bottom: 12px; padding: 10px 14px; background: ${bgColor}; border-radius: 8px; border: 1px solid #e2e8f0;">
+          <strong style="color: ${roleColor}; font-size: 12px;">${roleName} (${m.timestamp || ''})</strong>
+          <p style="margin: 4px 0 0 0; font-size: 14px; white-space: pre-wrap; line-height: 1.4; color: #334155;">${textVal}</p>
+        </div>
+      `;
+    }).join('');
+
+    const emailBodyHTML = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 650px; margin: 0 auto; border: 1px solid #e2e8f0; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+        <div style="text-align: center; margin-bottom: 20px;">
+          <h2 style="color: #008080; margin: 0; font-size: 22px;">ABC Hospital Virtual Assistant</h2>
+          <p style="color: #64748b; margin: 4px 0 0 0; font-size: 13px;">Automated Operations Dispatch</p>
+        </div>
+        
+        <div style="background: #fafafa; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+          ${introHtml}
+        </div>
+
+        <h3 style="color: #1e293b; border-bottom: 2px solid #e2e8f0; padding-bottom: 6px; margin-top: 25px;">Patient Chat History Transcript:</h3>
+        <div style="max-height: 400px; overflow-y: auto; padding: 5px;">
+          ${chatHtml || '<p style="color: #94a3b8; font-style: italic;">No chat history available.</p>'}
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 25px 0;" />
+        <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">
+          This secure message was transmitted on behalf of patient services at ABC Hospital. 
+          For operational queries, please check your connected Google Workspace account.
+        </p>
+      </div>
+    `;
+
+    try {
+      await sendEmailViaGmail({
+        to: 'goldenomet@gmail.com',
+        subject: subject,
+        body: emailBodyHTML
+      });
+      console.log(`Operational email sent successfully to goldenomet@gmail.com for: ${subject}`);
+    } catch (err) {
+      console.error(`Failed to send operational email for: ${subject}`, err);
+    }
+  };
+
+  const notifyDeveloperOfNewChatInquiry = async (firstMessageText: string) => {
+    if (!user || !token || hasNotifiedDeveloperOfChatInquiry) return;
+    
+    const trimmedName = patientName.trim() || 'Anonymous Patient';
+    const trimmedEmail = email.trim() || 'Not provided';
+    const trimmedPhone = phone.trim() || 'Not provided';
+
+    const notificationHtml = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+        <h2 style="color: #008080; border-bottom: 2px solid #008080; padding-bottom: 8px; margin-top: 0; font-size: 18px;">🔔 New Patient Inquiry Received</h2>
+        <p>A patient has initiated a live consultation session with the ABC Hospital Virtual Assistant.</p>
+        
+        <div style="background: #fafafa; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin: 15px 0;">
+          <h3 style="margin-top: 0; color: #008080; font-size: 14px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px;">Patient Demographics</h3>
+          <table style="width: 100%; font-size: 13px; line-height: 1.6;">
+            <tr><td style="width: 110px; color: #64748b;"><strong>Name:</strong></td><td><strong>${trimmedName}</strong></td></tr>
+            <tr><td style="color: #64748b;"><strong>Email:</strong></td><td>${trimmedEmail}</td></tr>
+            <tr><td style="color: #64748b;"><strong>Phone:</strong></td><td>${trimmedPhone}</td></tr>
+          </table>
+        </div>
+
+        <div style="background: #f0fdfa; border-left: 4px solid #008080; padding: 12px; margin: 15px 0; border-radius: 4px;">
+          <strong style="color: #008080; font-size: 13px;">Initial Patient Inquiry:</strong>
+          <p style="margin: 4px 0 0 0; font-style: italic; color: #334155;">"${firstMessageText}"</p>
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+        <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">Automated Operational Notification · ABC Hospital Systems</p>
+      </div>
+    `;
+
+    try {
+      await sendEmailViaGmail({
+        to: 'goldenomet@gmail.com',
+        subject: `[New Inquiry] ${trimmedName} is consulting the Assistant`,
+        body: notificationHtml
+      });
+      setHasNotifiedDeveloperOfChatInquiry(true);
+      console.log('Successfully notified developer of new chat inquiry.');
+    } catch (err) {
+      console.error('Failed to send new inquiry notification email to developer:', err);
+    }
+  };
+
+  const executeClosureAndPrintAutomation = async (triggerType: 'printout' | 'closure') => {
+    const trimmedName = patientName.trim() || 'Anonymous Patient';
+    const trimmedEmail = email.trim() || 'Not provided';
+    const trimmedPhone = phone.trim() || 'Not provided';
+    
+    setIsAutomatingClosure(true);
+    setClosureAutomationResult(null);
+
+    const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+    const lastMsgText = lastMsg ? (lastMsg.text || (lastMsg.audio ? '[Voice Note]' : '')) : '';
+
+    // 1. Automate Patient lead registration to Google Sheet
+    let sheetLink = '';
+    if (user && token) {
+      try {
+        const res = await syncPatientLeadToSheets({
+          name: trimmedName,
+          email: trimmedEmail,
+          phone: trimmedPhone,
+          lastMessage: `[Auto-${triggerType.toUpperCase()}] ${lastMsgText || 'Inquiry Closed'}`
+        });
+        sheetLink = res.webViewLink || '';
+        console.log('[Automation] Registered patient vitals to Google Sheets.');
+      } catch (err) {
+        console.error('[Automation] Google Sheets registration failed:', err);
+      }
+    }
+
+    // 2. Format a gorgeous Clinical Consultation Report Email
+    const emailBodyHTML = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 650px; margin: 0 auto; border: 1px solid #e2e8f0; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+        <div style="text-align: center; border-bottom: 2px solid #008080; padding-bottom: 12px; margin-bottom: 20px;">
+          <h2 style="color: #008080; margin: 0; font-size: 22px;">ABC HOSPITAL CONSULTATION RECORD</h2>
+          <p style="color: #64748b; margin: 4px 0 0 0; font-size: 13px; text-transform: uppercase; letter-spacing: 1px;">Automated Session Summary (${triggerType.toUpperCase()})</p>
+        </div>
+        
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+          <h3 style="color: #0f172a; margin-top: 0; font-size: 15px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px;">📋 PATIENT VITAL INFORMATION</h3>
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.6;">
+            <tr>
+              <td style="padding: 4px 0; color: #64748b; width: 140px;"><strong>Full Name:</strong></td>
+              <td style="padding: 4px 0; color: #1e293b; font-weight: bold;">${trimmedName}</td>
+            </tr>
+            <tr>
+              <td style="padding: 4px 0; color: #64748b;"><strong>Email Address:</strong></td>
+              <td style="padding: 4px 0; color: #1e293b;">${trimmedEmail}</td>
+            </tr>
+            <tr>
+              <td style="padding: 4px 0; color: #64748b;"><strong>Phone Number:</strong></td>
+              <td style="padding: 4px 0; color: #1e293b;">${trimmedPhone}</td>
+            </tr>
+            <tr>
+              <td style="padding: 4px 0; color: #64748b;"><strong>Session Trigger:</strong></td>
+              <td style="padding: 4px 0; color: #1e293b; font-weight: bold; text-transform: uppercase; color: #008080;">${triggerType}</td>
+            </tr>
+            <tr>
+              <td style="padding: 4px 0; color: #64748b;"><strong>Session Status:</strong></td>
+              <td style="padding: 4px 0; color: #10b981; font-weight: bold;">SECURED & CLOSED</td>
+            </tr>
+            ${sheetLink ? `
+            <tr>
+              <td style="padding: 4px 0; color: #64748b;"><strong>Google Sheet Record:</strong></td>
+              <td style="padding: 4px 0;"><a href="${sheetLink}" target="_blank" style="color: #008080; font-weight: bold; text-decoration: underline;">View Live Sheet Row</a></td>
+            </tr>
+            ` : ''}
+          </table>
+        </div>
+
+        <h3 style="color: #1e293b; border-bottom: 2px solid #e2e8f0; padding-bottom: 6px; margin-top: 25px;">Consultation Chat History:</h3>
+        <div style="max-height: 400px; overflow-y: auto; padding: 5px;">
+          ${messages.map(m => {
+            const isUser = m.role === 'user';
+            const roleName = isUser ? 'Patient' : 'ABC Hospital Assistant';
+            const roleColor = isUser ? '#1e293b' : '#008080';
+            const bgColor = isUser ? '#f1f5f9' : '#f0fdfa';
+            const textVal = m.text || (m.audio ? '[Voice Note / Audio Message]' : '');
+            return `
+              <div style="margin-bottom: 12px; padding: 10px 14px; background: ${bgColor}; border-radius: 8px; border: 1px solid #e2e8f0;">
+                <strong style="color: ${roleColor}; font-size: 11px;">${roleName} (${m.timestamp || ''})</strong>
+                <p style="margin: 4px 0 0 0; font-size: 13px; white-space: pre-wrap; line-height: 1.4; color: #334155;">${textVal}</p>
+              </div>
+            `;
+          }).join('') || '<p style="color: #94a3b8; font-style: italic;">No communication records found in this session.</p>'}
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 25px 0;" />
+        <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">
+          This record was generated via the secure ABC Hospital Patient Assistant portal. 
+          Please present this record at check-in or to your assigned healthcare specialist.
+        </p>
+      </div>
+    `;
+
+    // 3. Automate dispatching emails
+    if (user && token) {
+      try {
+        // Email developer (goldenomet@gmail.com)
+        await sendEmailViaGmail({
+          to: 'goldenomet@gmail.com',
+          subject: `[ABC Hospital Closure] ${triggerType.toUpperCase()} Record for ${trimmedName}`,
+          body: emailBodyHTML
+        });
+        console.log(`[Automation] Successfully emailed developer: goldenomet@gmail.com`);
+
+        // Email patient (if provided)
+        if (trimmedEmail && trimmedEmail.includes('@') && trimmedEmail !== 'Not provided') {
+          await sendEmailViaGmail({
+            to: trimmedEmail,
+            subject: `Your ABC Hospital Consultation Summary & Record (${triggerType.toUpperCase()})`,
+            body: emailBodyHTML
+          });
+          console.log(`[Automation] Successfully emailed copy to patient: ${trimmedEmail}`);
+        }
+
+        setClosureAutomationResult({ 
+          success: true, 
+          message: `Consultation session automatically locked, saved to Google Sheets, and dispatched via Gmail!` 
+        });
+      } catch (err: any) {
+        console.error('[Automation] Failed to dispatch automated emails:', err);
+        setClosureAutomationResult({ 
+          success: false, 
+          message: `Vitals synced, but email dispatch had an error: ${err.message || 'Gmail error'}` 
+        });
+      }
+    } else {
+      console.log('No Google Session available; saved progress locally.');
+      setClosureAutomationResult({ 
+        success: true, 
+        message: `Consultation marked resolved! (Connect a Google Account to automate full Sheets & Gmail storage).` 
+      });
+    }
+
+    setIsAutomatingClosure(false);
+  };
+
+  const detectAndEmailAppointment = async (modelResponseText: string, currentMessages: Message[]) => {
+    const confirmMatch = modelResponseText.match(/\[SHOW_CONFIRMATION\|([^\]]+)\]/);
+    if (confirmMatch) {
+      const parts = confirmMatch[1].split('|').map(p => p.trim());
+      if (parts.length >= 4) {
+        const appointmentInfo = {
+          doctor: parts[0] || 'Unspecified Doctor',
+          date: parts[1] || 'Unspecified Date',
+          time: parts[2] || 'Unspecified Time',
+          department: parts[3] || 'Unspecified Department',
+          patientName: parts[4] || patientName || 'Anonymous',
+          email: parts[5] || email || 'Not provided',
+          phone: parts[6] || phone || 'Not provided',
+        };
+
+        const introHtml = `
+          <h3 style="color: #10b981; margin-top: 0; font-size: 16px;">📅 Appointment Confirmed successfully!</h3>
+          <p>An appointment has been successfully scheduled via the ABC Hospital Virtual Assistant.</p>
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+            <tr>
+              <td style="padding: 6px 0; color: #64748b; width: 120px;"><strong>Doctor:</strong></td>
+              <td style="padding: 6px 0; color: #1e293b;"><strong>${appointmentInfo.doctor}</strong></td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;"><strong>Department:</strong></td>
+              <td style="padding: 6px 0; color: #1e293b;">${appointmentInfo.department}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;"><strong>Date:</strong></td>
+              <td style="padding: 6px 0; color: #1e293b;">${appointmentInfo.date}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;"><strong>Time:</strong></td>
+              <td style="padding: 6px 0; color: #1e293b;">${appointmentInfo.time}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;"><strong>Patient Name:</strong></td>
+              <td style="padding: 6px 0; color: #1e293b;">${appointmentInfo.patientName}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;"><strong>Email:</strong></td>
+              <td style="padding: 6px 0; color: #1e293b;">${appointmentInfo.email}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #64748b;"><strong>Phone:</strong></td>
+              <td style="padding: 6px 0; color: #1e293b;">${appointmentInfo.phone}</td>
+            </tr>
+          </table>
+        `;
+
+        await sendEmailWithChatHistory(
+          `New Appointment Confirmed: ${appointmentInfo.patientName} with ${appointmentInfo.doctor}`,
+          introHtml,
+          currentMessages
+        );
+      }
+    }
+  };
+
   const handleSyncLead = async (manual = false) => {
     const trimmedName = patientName.trim();
     const trimmedEmail = email.trim();
@@ -224,6 +581,40 @@ export function ChatInterface({
       setLastSyncedDetails(currentDetails);
       setSyncResult({ success: true, link: res.webViewLink, message: 'Lead successfully synced to Google Sheet!' });
       
+      // Automatically send Patient Lead & Chat History email to goldenomet@gmail.com
+      const leadIntroHtml = `
+        <h3 style="color: #008080; margin-top: 0; font-size: 16px;">👥 Patient Lead Profile Synced to Google Sheet!</h3>
+        <p>A new patient lead profile has been created/updated on Google Sheets.</p>
+        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+          <tr>
+            <td style="padding: 6px 0; color: #64748b; width: 120px;"><strong>Patient Name:</strong></td>
+            <td style="padding: 6px 0; color: #1e293b;"><strong>${trimmedName || 'Anonymous'}</strong></td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #64748b;"><strong>Email:</strong></td>
+            <td style="padding: 6px 0; color: #1e293b;">${trimmedEmail || 'Not provided'}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #64748b;"><strong>Phone:</strong></td>
+            <td style="padding: 6px 0; color: #1e293b;">${trimmedPhone || 'Not provided'}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #64748b;"><strong>Latest Query:</strong></td>
+            <td style="padding: 6px 0; color: #1e293b; font-style: italic;">"${lastMsgText || 'Consultation lead from ABC Hospital Bot'}"</td>
+          </tr>
+          ${res.webViewLink ? `
+          <tr>
+            <td style="padding: 6px 0; color: #64748b;"><strong>Google Sheet Link:</strong></td>
+            <td style="padding: 6px 0;"><a href="${res.webViewLink}" target="_blank" style="color: #008080; font-weight: bold; text-decoration: underline;">Open Google Sheet</a></td>
+          </tr>
+          ` : ''}
+        </table>
+      `;
+      sendEmailWithChatHistory(
+        `Patient Lead Synced: ${trimmedName || 'Anonymous'}`,
+        leadIntroHtml
+      ).catch(err => console.error('Failed to send patient lead sync email:', err));
+
       if (!manual) {
         setTimeout(() => {
           setSyncResult(null);
@@ -295,6 +686,10 @@ export function ChatInterface({
     setIsProcessingAudio(true);
     setIsLoading(true);
 
+    if (!hasNotifiedDeveloperOfChatInquiry) {
+      notifyDeveloperOfNewChatInquiry('[Voice Note / Audio Inquiry]').catch(console.error);
+    }
+
     try {
       const payloadMessages = [...messages, newUserMsg].map(m => ({ 
         role: m.role, 
@@ -317,11 +712,15 @@ export function ChatInterface({
       if (!response.ok) throw new Error('Failed to get response');
       const data = await response.json();
       
-      setMessages((prev) => [
-        ...prev,
-        { id: (Date.now() + 1).toString(), role: 'model', text: data.text, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
-      ]);
+      const updatedMessages: Message[] = [
+        ...messages,
+        newUserMsg,
+        { id: (Date.now() + 1).toString(), role: 'model', text: data.text, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+      ];
+
+      setMessages(updatedMessages);
       checkAndTriggerAutoSync();
+      detectAndEmailAppointment(data.text, updatedMessages).catch(console.error);
     } catch (error) {
       console.error('Chat error:', error);
       setMessages((prev) => [
@@ -405,6 +804,10 @@ export function ChatInterface({
     setMessages((prev) => [...prev, newUserMsg]);
     setIsLoading(true);
 
+    if (!hasNotifiedDeveloperOfChatInquiry) {
+      notifyDeveloperOfNewChatInquiry(userText).catch(console.error);
+    }
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -420,11 +823,15 @@ export function ChatInterface({
       if (!response.ok) throw new Error('Failed to get response');
       const data = await response.json();
       
-      setMessages((prev) => [
-        ...prev,
-        { id: (Date.now() + 1).toString(), role: 'model', text: data.text, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
-      ]);
+      const updatedMessages: Message[] = [
+        ...messages,
+        newUserMsg,
+        { id: (Date.now() + 1).toString(), role: 'model', text: data.text, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+      ];
+
+      setMessages(updatedMessages);
       checkAndTriggerAutoSync();
+      detectAndEmailAppointment(data.text, updatedMessages).catch(console.error);
     } catch (error) {
       console.error('Chat error:', error);
       setMessages((prev) => [
@@ -524,7 +931,7 @@ export function ChatInterface({
     if (user && token) {
       try {
         await sendEmailViaGmail({
-          to: user.email || 'goldenomet0@gmail.com',
+          to: 'goldenomet@gmail.com',
           subject: `Patient Rating Alert: ${rating === 'up' ? '👍 Positive' : '👎 Negative'} Feedback Received`,
           body: emailBodyHTML
         });
@@ -572,7 +979,7 @@ export function ChatInterface({
     if (user && token) {
       try {
         await sendEmailViaGmail({
-          to: user.email || 'goldenomet0@gmail.com',
+          to: 'goldenomet@gmail.com',
           subject: `Patient Star Rating Received: ${score}/5 Stars ⭐`,
           body: emailBodyHTML
         });
@@ -591,6 +998,189 @@ export function ChatInterface({
       }, 800);
       console.log('No active Google session to send star rating email; saved rating locally.');
     }
+  };
+
+  const handleCloseInquiryPrompt = () => {
+    setShowClosureConfirmModal(true);
+  };
+
+  const handleConfirmClosure = () => {
+    setShowClosureConfirmModal(false);
+    setIsInquiryClosed(true);
+    executeClosureAndPrintAutomation('closure').catch(console.error);
+  };
+
+  const handleReopenInquiry = () => {
+    setIsInquiryClosed(false);
+    setClosureAutomationResult(null);
+  };
+
+  const handlePrint = () => {
+    playBeep(659.25, 0.1, 'sine'); // E5 note feedback
+    
+    // Create print-root div
+    const printDiv = document.createElement('div');
+    printDiv.id = 'print-root';
+    
+    const formattedName = patientName.trim() || 'Anonymous Patient';
+    const formattedEmail = email.trim() || 'Not provided';
+    const formattedPhone = phone.trim() || 'Not provided';
+    const printTime = new Date().toLocaleString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+
+    // Check for appointments in messages
+    const appointments: any[] = [];
+    messages.forEach(m => {
+      const confirmMatch = m.text?.match(/\[SHOW_CONFIRMATION\|([^\]]+)\]/);
+      if (confirmMatch) {
+        const parts = confirmMatch[1].split('|').map(p => p.trim());
+        if (parts.length >= 4) {
+          appointments.push({
+            doctor: parts[0] || 'Unspecified Doctor',
+            date: parts[1] || 'Unspecified Date',
+            time: parts[2] || 'Unspecified Time',
+            department: parts[3] || 'Unspecified Department',
+            patientName: parts[4] || patientName || 'Anonymous',
+            email: parts[5] || email || 'Not provided',
+            phone: parts[6] || phone || 'Not provided',
+          });
+        }
+      }
+    });
+
+    let appointmentsHtml = '';
+    if (appointments.length > 0) {
+      appointmentsHtml = `
+        <div style="margin-top: 25px; margin-bottom: 25px; padding: 18px; border: 2px solid #008080; border-radius: 10px; background-color: #f0fdfa;" class="print-avoid-break">
+          <h2 style="color: #008080; margin-top: 0; margin-bottom: 12px; font-size: 18px; border-bottom: 1px solid #008080; padding-bottom: 6px; font-family: sans-serif;">📅 CONFIRMED APPOINTMENTS</h2>
+          ${appointments.map((app, idx) => `
+            <div style="margin-bottom: ${idx < appointments.length - 1 ? '16px' : '0'};">
+              <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-family: sans-serif; line-height: 1.6;">
+                <tr>
+                  <td style="padding: 4px 0; color: #475569; width: 140px;"><strong>Patient Name:</strong></td>
+                  <td style="padding: 4px 0; color: #0f172a;"><strong>${app.patientName}</strong></td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 0; color: #475569;"><strong>Doctor / Specialist:</strong></td>
+                  <td style="padding: 4px 0; color: #0f172a; font-weight: bold;">${app.doctor}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 0; color: #475569;"><strong>Department:</strong></td>
+                  <td style="padding: 4px 0; color: #0f172a;">${app.department}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 0; color: #475569;"><strong>Date & Time:</strong></td>
+                  <td style="padding: 4px 0; color: #0f172a; font-weight: bold;">${app.date} at ${app.time}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 0; color: #475569;"><strong>Contact Email:</strong></td>
+                  <td style="padding: 4px 0; color: #0f172a;">${app.email}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 0; color: #475569;"><strong>Contact Phone:</strong></td>
+                  <td style="padding: 4px 0; color: #0f172a;">${app.phone}</td>
+                </tr>
+              </table>
+              ${idx < appointments.length - 1 ? '<hr style="border: 0; border-top: 1px dashed #008080; margin: 12px 0;" />' : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    // Build chat transcript HTML
+    const transcriptHtml = messages.map(m => {
+      const isUser = m.role === 'user';
+      const roleName = isUser ? 'Patient' : 'ABC Hospital Assistant';
+      const roleColor = isUser ? '#1e293b' : '#008080';
+      const bgColor = isUser ? '#f8fafc' : '#f0fdfa';
+      const borderColor = isUser ? '#e2e8f0' : '#ccfbf1';
+      
+      // Clean display text (strip appointments shortcodes)
+      let cleanText = m.text || '';
+      if (m.audio) {
+        cleanText = '[Voice Note / Audio Message Received]';
+      } else {
+        cleanText = cleanText.replace(/\[SHOW_CONFIRMATION\|[^\]]+\]/g, '').trim();
+      }
+
+      if (!cleanText) return '';
+
+      return `
+        <div style="margin-bottom: 12px; padding: 12px 16px; background: ${bgColor}; border: 1px solid ${borderColor}; border-radius: 8px; font-family: sans-serif;" class="print-avoid-break">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <strong style="color: ${roleColor}; font-size: 13px;">${roleName}</strong>
+            <span style="color: #64748b; font-size: 11px;">${m.timestamp || ''}</span>
+          </div>
+          <p style="margin: 0; font-size: 13px; line-height: 1.5; color: #334155; white-space: pre-wrap;">${cleanText}</p>
+        </div>
+      `;
+    }).join('');
+
+    printDiv.innerHTML = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 10px;">
+        <!-- Letterhead Header -->
+        <div style="text-align: center; border-bottom: 3px double #334155; padding-bottom: 15px; margin-bottom: 20px;">
+          <h1 style="color: #008080; margin: 0; font-size: 26px; letter-spacing: 1px; font-family: sans-serif;">ABC MEDICAL CENTER</h1>
+          <p style="margin: 4px 0; font-size: 12px; color: #475569; text-transform: uppercase; letter-spacing: 2px; font-weight: bold;">Patient Care Services & Consultation Transcript</p>
+          <p style="margin: 2px 0; font-size: 11px; color: #64748b;">Plot 12, Hospital Road, Lagos, Nigeria · 24/7 Helpline: +234 800-ABC-HOSP</p>
+        </div>
+
+        <!-- Document Info Table -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px; padding: 12px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 12px;">
+          <div style="line-height: 1.6;">
+            <h3 style="margin: 0 0 6px 0; font-size: 13px; color: #008080; border-bottom: 1px solid #e2e8f0; padding-bottom: 3px;">PATIENT DEMOGRAPHICS</h3>
+            <strong>Full Name:</strong> ${formattedName}<br/>
+            <strong>Email Address:</strong> ${formattedEmail}<br/>
+            <strong>Phone Number:</strong> ${formattedPhone}
+          </div>
+          <div style="line-height: 1.6; text-align: right;">
+            <h3 style="margin: 0 0 6px 0; font-size: 13px; color: #008080; border-bottom: 1px solid #e2e8f0; padding-bottom: 3px; text-align: right;">RECORD METADATA</h3>
+            <strong>Document Type:</strong> Consultation Log<br/>
+            <strong>Printed On:</strong> ${printTime}<br/>
+            <strong>Status:</strong> Active Session
+          </div>
+        </div>
+
+        <!-- Appointments Block (If present) -->
+        ${appointmentsHtml}
+
+        <!-- Transcript Block -->
+        <div style="margin-top: 20px;">
+          <h3 style="font-size: 14px; color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 1px; font-family: sans-serif;">
+            Consultation Chat Transcript
+          </h3>
+          <div>
+            ${transcriptHtml || '<p style="color: #94a3b8; font-style: italic;">No communication records found in the current session.</p>'}
+          </div>
+        </div>
+
+        <!-- Letterhead Footer -->
+        <div style="margin-top: 40px; border-top: 1px solid #e2e8f0; padding-top: 15px; text-align: center;" class="print-avoid-break">
+          <p style="font-size: 11px; color: #94a3b8; margin: 0; font-style: italic;">
+            This document is a formal record of your virtual assistant medical inquiry consultation. 
+            Please present this printout or confirmation ID at the reception or to your assigned physician upon arrival.
+          </p>
+          <p style="font-size: 10px; color: #94a3b8; margin: 6px 0 0 0;">
+            Document Generated via ABC Hospital Portal · Secure & Private Encryption Enabled
+          </p>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(printDiv);
+    window.print();
+    document.body.removeChild(printDiv);
+
+    // Automatically trigger vital info sync to sheets and email logs upon printing
+    executeClosureAndPrintAutomation('printout').catch(console.error);
   };
 
   return (
@@ -622,9 +1212,40 @@ export function ChatInterface({
       </div>
 
       {/* Left Column: Chat Container (Styled exactly like the screenshots, font size increased) */}
-      <div className={`flex-1 flex-col h-full rounded-2xl overflow-hidden border shadow-md ${
+      <div className={`flex-1 flex flex-col h-full rounded-2xl overflow-hidden border shadow-md ${
         mobileTab !== 'chat' ? 'hidden lg:flex' : 'flex'
       } ${isHighContrast ? 'bg-black border-white' : 'bg-white border-slate-100'}`}>
+        
+        {/* Chat Header Actions Bar */}
+        <div className={`px-4 py-3 border-b flex items-center justify-between flex-shrink-0 ${
+          isHighContrast ? 'bg-zinc-900 border-white text-white' : 'bg-slate-50 border-slate-100'
+        }`}>
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+            </span>
+            <span className={`text-xs sm:text-sm font-bold uppercase tracking-wider ${
+              isHighContrast ? 'text-white' : 'text-slate-700'
+            }`}>
+              ABC Hospital Virtual Assistant
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handlePrint}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer hover:scale-105 active:scale-95 ${
+              isHighContrast
+                ? 'bg-white text-black border border-white hover:bg-gray-200'
+                : 'bg-white text-slate-700 hover:text-[#008080] border border-slate-200 hover:border-[#008080]/30 hover:bg-[#008080]/5'
+            }`}
+            title="Print Conversation & Appointments"
+          >
+            <Printer size={14} className={isHighContrast ? 'text-black' : 'text-slate-500'} />
+            <span>Print Records</span>
+          </button>
+        </div>
+
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
           {/* Welcome Image Banner at top of chat pane */}
           <div className="relative w-full h-36 sm:h-44 overflow-hidden rounded-xl mb-4 flex-shrink-0">
@@ -845,6 +1466,8 @@ export function ChatInterface({
             </button>
           </div>
         </div>
+
+
 
         {/* Admin Passcode Gate (Option A) */}
         {showPasscodePrompt && (
@@ -1068,7 +1691,7 @@ export function ChatInterface({
               </div>
               
               <p className="text-xs text-gray-500 leading-relaxed">
-                Send instant personalized follow-ups or confirmation emails to patient leads via connected Gmail account.
+                Compose, search, and manage follow-ups or confirmation emails with real-time Gmail connection.
               </p>
 
               {!user ? (
@@ -1077,77 +1700,191 @@ export function ChatInterface({
                 </div>
               ) : (
                 <div className="space-y-3 mt-1">
-                  {/* Recipient Input */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Recipient Email</label>
-                    <div className="relative">
-                      <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-gray-400">
-                        <User size={13} />
-                      </span>
-                      <input
-                        type="email"
-                        value={gmailTo}
-                        onChange={(e) => setGmailTo(e.target.value)}
-                        placeholder="patient@example.com"
-                        className={`w-full pl-8 pr-3 py-1.5 rounded-lg text-xs border transition-all focus:outline-none focus:ring-1 ${
-                          isHighContrast
-                            ? 'border-white bg-black text-white focus:ring-yellow-300'
-                            : 'border-slate-200 bg-white text-slate-800 focus:ring-[#008080] focus:border-[#008080]'
+                  {/* Tab Switcher */}
+                  <div className={`flex p-1 rounded-xl border ${isHighContrast ? 'bg-black border-white' : 'bg-slate-50 border-slate-100'}`}>
+                    <button
+                      type="button"
+                      onClick={() => setGmailSubTab('send')}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        gmailSubTab === 'send'
+                          ? (isHighContrast ? 'bg-white text-black' : 'bg-[#008080] text-white shadow-sm')
+                          : (isHighContrast ? 'bg-black text-white' : 'bg-transparent text-slate-600 hover:bg-slate-100')
+                      }`}
+                    >
+                      Compose
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGmailSubTab('inbox');
+                        fetchRecentEmails(emailsSearchQuery);
+                      }}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        gmailSubTab === 'inbox'
+                          ? (isHighContrast ? 'bg-white text-black' : 'bg-[#008080] text-white shadow-sm')
+                          : (isHighContrast ? 'bg-black text-white' : 'bg-transparent text-slate-600 hover:bg-slate-100')
+                      }`}
+                    >
+                      Search & Logs
+                    </button>
+                  </div>
+
+                  {gmailSubTab === 'send' ? (
+                    <div className="space-y-3">
+                      {/* Recipient Input */}
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Recipient Email</label>
+                        <div className="relative">
+                          <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-gray-400">
+                            <User size={13} />
+                          </span>
+                          <input
+                            type="email"
+                            value={gmailTo}
+                            onChange={(e) => setGmailTo(e.target.value)}
+                            placeholder="patient@example.com"
+                            className={`w-full pl-8 pr-3 py-1.5 rounded-lg text-xs border transition-all focus:outline-none focus:ring-1 ${
+                              isHighContrast
+                                ? 'border-white bg-black text-white focus:ring-yellow-300'
+                                : 'border-slate-200 bg-white text-slate-800 focus:ring-[#008080] focus:border-[#008080]'
+                            }`}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Subject Input */}
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Email Subject</label>
+                        <input
+                          type="text"
+                          value={gmailSubject}
+                          onChange={(e) => setGmailSubject(e.target.value)}
+                          placeholder="Subject"
+                          className={`w-full px-3 py-1.5 rounded-lg text-xs border transition-all focus:outline-none focus:ring-1 ${
+                            isHighContrast
+                              ? 'border-white bg-black text-white focus:ring-yellow-300'
+                              : 'border-slate-200 bg-white text-slate-800 focus:ring-[#008080] focus:border-[#008080]'
+                          }`}
+                        />
+                      </div>
+
+                      {/* Message Input */}
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Message Draft</label>
+                        <textarea
+                          rows={4}
+                          value={gmailBody}
+                          onChange={(e) => setGmailBody(e.target.value)}
+                          placeholder="Write message..."
+                          className={`w-full px-3 py-1.5 rounded-lg text-xs border transition-all focus:outline-none focus:ring-1 resize-none scrollbar-thin ${
+                            isHighContrast
+                              ? 'border-white bg-black text-white focus:ring-yellow-300'
+                              : 'border-slate-200 bg-white text-slate-800 focus:ring-[#008080] focus:border-[#008080]'
+                          }`}
+                        />
+                      </div>
+
+                      {/* Action button */}
+                      <button
+                        type="button"
+                        onClick={handleSendEmail}
+                        disabled={isSendingEmail || !gmailTo.trim()}
+                        className={`w-full py-2 px-3 rounded-xl font-bold text-xs border flex items-center justify-center gap-1.5 transition-all disabled:opacity-40 cursor-pointer ${
+                          isHighContrast 
+                            ? 'border-white bg-black text-white hover:bg-white hover:text-black' 
+                            : 'bg-[#008080] border-transparent text-white hover:bg-[#006666]'
                         }`}
-                      />
+                      >
+                        {isSendingEmail ? (
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Send className="w-3.5 h-3.5" />
+                        )}
+                        Send Follow-up Email
+                      </button>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {/* Search Bar */}
+                      <div className="flex gap-1.5">
+                        <div className="relative flex-1">
+                          <span className="absolute inset-y-0 left-0 flex items-center pl-2.5 pointer-events-none text-gray-400">
+                            <Search size={11} />
+                          </span>
+                          <input
+                            type="text"
+                            value={emailsSearchQuery}
+                            onChange={(e) => setEmailsSearchQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                fetchRecentEmails(emailsSearchQuery);
+                              }
+                            }}
+                            placeholder="Search, e.g. subject:Patient"
+                            className={`w-full pl-7 pr-2 py-1 rounded-lg text-[11px] border transition-all focus:outline-none focus:ring-1 ${
+                              isHighContrast
+                                ? 'border-white bg-black text-white focus:ring-yellow-300'
+                                : 'border-slate-200 bg-white text-slate-800 focus:ring-[#008080] focus:border-[#008080]'
+                            }`}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => fetchRecentEmails(emailsSearchQuery)}
+                          disabled={isFetchingEmails}
+                          className={`px-2 py-1 rounded-lg text-[11px] font-bold border flex items-center gap-1 transition-all cursor-pointer ${
+                            isHighContrast
+                              ? 'border-white bg-white text-black'
+                              : 'bg-[#008080] border-transparent text-white hover:bg-[#006666]'
+                          }`}
+                        >
+                          {isFetchingEmails ? <RefreshCw size={11} className="animate-spin" /> : <Search size={11} />}
+                          Search
+                        </button>
+                      </div>
 
-                  {/* Subject Input */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Email Subject</label>
-                    <input
-                      type="text"
-                      value={gmailSubject}
-                      onChange={(e) => setGmailSubject(e.target.value)}
-                      placeholder="Subject"
-                      className={`w-full px-3 py-1.5 rounded-lg text-xs border transition-all focus:outline-none focus:ring-1 ${
-                        isHighContrast
-                          ? 'border-white bg-black text-white focus:ring-yellow-300'
-                          : 'border-slate-200 bg-white text-slate-800 focus:ring-[#008080] focus:border-[#008080]'
-                      }`}
-                    />
-                  </div>
-
-                  {/* Message Input */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Message Draft</label>
-                    <textarea
-                      rows={4}
-                      value={gmailBody}
-                      onChange={(e) => setGmailBody(e.target.value)}
-                      placeholder="Write message..."
-                      className={`w-full px-3 py-1.5 rounded-lg text-xs border transition-all focus:outline-none focus:ring-1 resize-none scrollbar-thin ${
-                        isHighContrast
-                          ? 'border-white bg-black text-white focus:ring-yellow-300'
-                          : 'border-slate-200 bg-white text-slate-800 focus:ring-[#008080] focus:border-[#008080]'
-                      }`}
-                    />
-                  </div>
-
-                  {/* Action button */}
-                  <button
-                    type="button"
-                    onClick={handleSendEmail}
-                    disabled={isSendingEmail || !gmailTo.trim()}
-                    className={`w-full py-2 px-3 rounded-xl font-bold text-xs border flex items-center justify-center gap-1.5 transition-all disabled:opacity-40 cursor-pointer ${
-                      isHighContrast 
-                        ? 'border-white bg-black text-white hover:bg-white hover:text-black' 
-                        : 'bg-[#008080] border-transparent text-white hover:bg-[#006666]'
-                    }`}
-                  >
-                    {isSendingEmail ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Send className="w-3.5 h-3.5" />
-                    )}
-                    Send Follow-up Email
-                  </button>
+                      {/* Emails list container */}
+                      {isFetchingEmails ? (
+                        <div className="flex flex-col items-center justify-center py-8 gap-2">
+                          <RefreshCw className="w-5 h-5 animate-spin text-slate-400" />
+                          <span className="text-[11px] text-gray-400">Connecting Gmail...</span>
+                        </div>
+                      ) : emailsList.length === 0 ? (
+                        <div className={`text-center py-8 text-[11px] border border-dashed rounded-xl ${isHighContrast ? 'border-zinc-800 text-gray-500' : 'border-slate-100 text-slate-400'}`}>
+                          No emails found. Send some or change your search.
+                        </div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-[220px] overflow-y-auto pr-1 scrollbar-thin">
+                          {emailsList.map((email) => (
+                            <div
+                              key={email.id}
+                              onClick={() => loadEmailDetail(email.id)}
+                              className={`p-2.5 rounded-xl border text-left cursor-pointer transition-all hover:scale-[1.01] active:scale-[0.99] flex flex-col gap-1 ${
+                                isHighContrast
+                                  ? 'border-zinc-800 bg-zinc-950 hover:border-white'
+                                  : 'border-slate-100 bg-slate-50/50 hover:bg-slate-50 hover:border-slate-200 shadow-xs'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-1.5">
+                                <span className="font-bold text-[10px] truncate max-w-[120px] text-[#008080] uppercase tracking-wider">
+                                  To: {email.to?.replace(/<.*>/, '').trim() || 'Patient'}
+                                </span>
+                                <span className="text-[9px] text-slate-400 font-mono">
+                                  {email.date ? new Date(email.date).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}
+                                </span>
+                              </div>
+                              <div className="font-bold text-xs text-slate-800 truncate">
+                                {email.subject}
+                              </div>
+                              <p className="text-[10px] text-slate-500 line-clamp-1 leading-normal font-medium">
+                                {email.snippet}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1327,6 +2064,166 @@ export function ChatInterface({
         </div>
 
       </div>
+
+      {selectedEmailDetail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fadeIn">
+          <div className={`w-full max-w-2xl max-h-[85vh] rounded-2xl border shadow-2xl flex flex-col overflow-hidden ${
+            isHighContrast ? 'bg-black border-white text-white' : 'bg-white border-slate-100 text-slate-800'
+          }`}>
+            {/* Modal Header */}
+            <div className={`px-5 py-4 border-b flex items-center justify-between ${
+              isHighContrast ? 'border-white bg-zinc-900' : 'border-slate-100 bg-slate-50'
+            }`}>
+              <div className="flex items-center gap-2">
+                <Mail size={18} className={isHighContrast ? 'text-white' : 'text-[#008080]'} />
+                <h3 className="font-bold text-sm sm:text-base truncate max-w-[280px] sm:max-w-[450px]">
+                  {selectedEmailDetail.subject || 'No Subject'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setSelectedEmailDetail(null)}
+                className={`p-1.5 rounded-lg border transition-all hover:scale-105 active:scale-95 cursor-pointer ${
+                  isHighContrast ? 'border-white text-white hover:bg-white hover:text-black' : 'border-slate-200 text-slate-500 hover:bg-slate-100'
+                }`}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4">
+              {isFetchingEmailDetail ? (
+                <div className="flex flex-col items-center justify-center py-12 gap-2">
+                  <RefreshCw className="w-8 h-8 animate-spin text-[#008080]" />
+                  <span className="text-sm text-gray-500 font-semibold">Loading email content...</span>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className={`p-4 rounded-xl text-xs space-y-1 ${
+                    isHighContrast ? 'bg-zinc-900 border border-white' : 'bg-slate-50 text-slate-600'
+                  }`}>
+                    <div><strong>From:</strong> {emailsList.find(e => e.id === selectedEmailDetail.id)?.from || 'Me'}</div>
+                    <div><strong>To:</strong> {emailsList.find(e => e.id === selectedEmailDetail.id)?.to || 'Patient'}</div>
+                    <div><strong>Date:</strong> {emailsList.find(e => e.id === selectedEmailDetail.id)?.date || ''}</div>
+                  </div>
+
+                  {/* Email Body HTML or plain text render */}
+                  <div 
+                    className={`p-4 rounded-xl border overflow-auto text-sm leading-relaxed max-h-[350px] font-sans ${
+                      isHighContrast ? 'border-white bg-black text-white' : 'border-slate-100 bg-white text-slate-800'
+                    }`}
+                  >
+                    {selectedEmailDetail.body.includes('<div') || selectedEmailDetail.body.includes('<p') || selectedEmailDetail.body.includes('<br') || selectedEmailDetail.body.includes('<html') ? (
+                      <div dangerouslySetInnerHTML={{ __html: selectedEmailDetail.body }} />
+                    ) : (
+                      <pre className="whitespace-pre-wrap font-sans text-xs">{selectedEmailDetail.body}</pre>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className={`px-5 py-3 border-t flex justify-end gap-2 ${
+              isHighContrast ? 'border-white bg-zinc-900' : 'border-slate-100 bg-slate-50'
+            }`}>
+              <button
+                onClick={() => setSelectedEmailDetail(null)}
+                className={`py-1.5 px-4 rounded-lg font-bold text-xs border transition-all cursor-pointer ${
+                  isHighContrast
+                    ? 'border-white bg-white text-black hover:bg-black hover:text-white'
+                    : 'bg-[#008080] text-white hover:bg-[#006666]'
+                }`}
+              >
+                Close Email
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showClosureConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fadeIn">
+          <div className={`w-full max-w-md rounded-2xl border shadow-2xl flex flex-col overflow-hidden ${
+            isHighContrast ? 'bg-black border-white text-white' : 'bg-white border-slate-100 text-slate-800'
+          }`}>
+            {/* Modal Header */}
+            <div className={`px-5 py-4 border-b flex items-center justify-between ${
+              isHighContrast ? 'border-white bg-zinc-900' : 'border-slate-100 bg-slate-50'
+            }`}>
+              <div className="flex items-center gap-2">
+                <CheckCircle2 size={18} className={isHighContrast ? 'text-white' : 'text-[#008080]'} />
+                <h3 className="font-bold text-sm sm:text-base">
+                  Confirm Inquiry Resolution
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowClosureConfirmModal(false)}
+                className={`p-1.5 rounded-lg border transition-all hover:scale-105 active:scale-95 cursor-pointer ${
+                  isHighContrast ? 'border-white text-white hover:bg-white hover:text-black' : 'border-slate-200 text-slate-500 hover:bg-slate-100'
+                }`}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 sm:p-6 space-y-4">
+              <p className="text-sm text-gray-500 leading-relaxed">
+                By confirming resolution, this consultation session will be marked as resolved, and we will automatically trigger the following workflows:
+              </p>
+              <ul className="space-y-2.5 text-xs text-slate-700 dark:text-zinc-300 font-medium">
+                <li className="flex items-start gap-2">
+                  <span className="text-[#008080] font-bold">✔</span>
+                  <span><strong>Google Sheets Sync:</strong> Patient vitals and conversation logs will be synchronized into the secure health records tracker spreadsheet.</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-[#008080] font-bold">✔</span>
+                  <span><strong>Workspace Outreach:</strong> A copy of the full consultation transcript will be emailed using secure Gmail to the designated patient coordinator.</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-[#008080] font-bold">✔</span>
+                  <span><strong>Developer Notification:</strong> The systems developer (goldenomet@gmail.com) will be alerted of the inquiry resolution.</span>
+                </li>
+              </ul>
+              {(!patientName.trim() && !email.trim() && !phone.trim()) && (
+                <div className={`p-3 rounded-xl text-xs flex gap-2 ${isHighContrast ? 'bg-zinc-900 border border-red-500 text-red-400' : 'bg-amber-50 text-amber-800 border border-amber-100'}`}>
+                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                  <span>Warning: You haven't filled out your patient details in the info form yet. Vitals may sync as "Anonymous Patient".</span>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className={`px-5 py-3.5 border-t flex justify-end gap-2.5 ${
+              isHighContrast ? 'border-white bg-zinc-900' : 'border-slate-100 bg-slate-50'
+            }`}>
+              <button
+                type="button"
+                onClick={() => setShowClosureConfirmModal(false)}
+                className={`py-2 px-4 rounded-xl font-bold text-xs border transition-all cursor-pointer ${
+                  isHighContrast
+                    ? 'border-white bg-black text-white hover:bg-white hover:text-black'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                Keep Active
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmClosure}
+                className={`py-2 px-4 rounded-xl font-bold text-xs border transition-all cursor-pointer ${
+                  isHighContrast
+                    ? 'border-white bg-white text-black hover:bg-black hover:text-white'
+                    : 'bg-[#008080] text-white hover:bg-[#006666]'
+                }`}
+              >
+                Yes, Resolve & Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

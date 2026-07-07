@@ -238,3 +238,125 @@ export const sendEmailViaGmail = async (params: EmailParams): Promise<{ id: stri
   return await response.json();
 };
 
+export interface GmailMessage {
+  id: string;
+  threadId: string;
+  subject?: string;
+  snippet?: string;
+  date?: string;
+  to?: string;
+  from?: string;
+}
+
+/**
+ * Lists the user's recent emails using the Gmail API.
+ * Optionally filters with a query string.
+ */
+export const listRecentEmails = async (query = '', maxResults = 5): Promise<GmailMessage[]> => {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error('User is not authenticated or access token is expired.');
+  }
+
+  let listUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${maxResults}`;
+  if (query) {
+    listUrl += `&q=${encodeURIComponent(query)}`;
+  }
+
+  const response = await fetch(listUrl, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error('Gmail List API error:', errText);
+    throw new Error('Failed to list emails from Gmail API.');
+  }
+
+  const data = await response.json();
+  if (!data.messages || data.messages.length === 0) {
+    return [];
+  }
+
+  const detailedMessages = await Promise.all(
+    data.messages.map(async (msg: { id: string }) => {
+      try {
+        const detailUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=To&metadataHeaders=From&metadataHeaders=Date`;
+        const detailRes = await fetch(detailUrl, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (detailRes.ok) {
+          const detailData = await detailRes.json();
+          const headers = detailData.payload?.headers || [];
+          const subject = headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
+          const to = headers.find((h: any) => h.name.toLowerCase() === 'to')?.value || 'Unknown To';
+          const from = headers.find((h: any) => h.name.toLowerCase() === 'from')?.value || 'Unknown From';
+          const date = headers.find((h: any) => h.name.toLowerCase() === 'date')?.value || '';
+          return {
+            id: msg.id,
+            threadId: detailData.threadId,
+            subject,
+            snippet: detailData.snippet || '',
+            to,
+            from,
+            date
+          };
+        }
+      } catch (err) {
+        console.error(`Failed to fetch details for message ${msg.id}`, err);
+      }
+      return null;
+    })
+  );
+
+  return detailedMessages.filter((m): m is GmailMessage => m !== null);
+};
+
+/**
+ * Fetches the detailed HTML or text content of a specific Gmail message.
+ */
+export const getEmailDetail = async (id: string): Promise<{ id: string; body: string; subject?: string }> => {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error('User is not authenticated or access token is expired.');
+  }
+
+  const detailUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
+  const response = await fetch(detailUrl, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch detailed email content.');
+  }
+
+  const data = await response.json();
+  const headers = data.payload?.headers || [];
+  const subject = headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
+  
+  // Helper to extract email body from payload parts
+  const extractBody = (payload: any): string => {
+    if (!payload) return '';
+    if (payload.body?.data) {
+      try {
+        const base64 = payload.body.data.replace(/-/g, '+').replace(/_/g, '/');
+        return decodeURIComponent(escape(atob(base64)));
+      } catch (e) {
+        console.error('Body decode error:', e);
+        return '';
+      }
+    }
+    if (payload.parts) {
+      for (const part of payload.parts) {
+        const body = extractBody(part);
+        if (body) return body;
+      }
+    }
+    return '';
+  };
+
+  const body = extractBody(data.payload) || data.snippet || 'No content';
+  return { id, body, subject };
+};
+
+

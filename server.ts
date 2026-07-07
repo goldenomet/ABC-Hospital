@@ -73,14 +73,70 @@ const knowledgeBase = [
 
 let documentEmbeddings: { title: string; content: string; embedding: number[] }[] = [];
 
+async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    const errorStr = String(error?.message || error || "").toUpperCase();
+    const isRateLimitOrUnavailable = 
+      error?.status === 503 || 
+      error?.status === 429 || 
+      error?.code === 503 || 
+      error?.code === 429 || 
+      errorStr.includes("503") || 
+      errorStr.includes("429") || 
+      errorStr.includes("UNAVAILABLE") || 
+      errorStr.includes("HIGH DEMAND") ||
+      errorStr.includes("TEMPORARY") ||
+      errorStr.includes("SPIKES IN DEMAND") ||
+      errorStr.includes("RESOURCE_EXHAUSTED");
+
+    if (retries > 0 && isRateLimitOrUnavailable) {
+      console.warn(`Gemini API returned transient/retryable error. Retrying in ${delay}ms... (Remaining retries: ${retries})`, error);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return retryWithBackoff(fn, retries - 1, delay * 2);
+    }
+    throw error;
+  }
+}
+
+async function generateContentWithRetryAndFallback(params: {
+  contents: any;
+  config: any;
+}): Promise<any> {
+  const primaryModel = "gemini-3.5-flash";
+  const fallbackModel = "gemini-3.1-flash-lite";
+
+  try {
+    return await retryWithBackoff(() => ai.models.generateContent({
+      model: primaryModel,
+      contents: params.contents,
+      config: params.config,
+    }), 3, 1000);
+  } catch (primaryError: any) {
+    console.error(`Primary model ${primaryModel} failed after retries. Trying fallback model ${fallbackModel}...`, primaryError);
+    
+    try {
+      return await retryWithBackoff(() => ai.models.generateContent({
+        model: fallbackModel,
+        contents: params.contents,
+        config: params.config,
+      }), 2, 1000);
+    } catch (fallbackError: any) {
+      console.error(`Fallback model ${fallbackModel} also failed.`, fallbackError);
+      throw primaryError; // Re-throw original error to preserve original context
+    }
+  }
+}
+
 async function initializeKnowledgeBase() {
   console.log("Initializing knowledge base embeddings...");
   try {
     for (const doc of knowledgeBase) {
-      const response = await ai.models.embedContent({
+      const response = await retryWithBackoff(() => ai.models.embedContent({
         model: "gemini-embedding-2-preview",
         contents: `Title: ${doc.title}\n\n${doc.content}`,
-      });
+      }), 3, 1500);
       documentEmbeddings.push({
         ...doc,
         embedding: response.embeddings?.[0]?.values || [],
@@ -187,10 +243,10 @@ async function startServer() {
 
       if (latestUserMsg && latestUserMsg.text && documentEmbeddings.length > 0) {
         try {
-          const embedRes = await ai.models.embedContent({
+          const embedRes = await retryWithBackoff(() => ai.models.embedContent({
             model: "gemini-embedding-2-preview",
             contents: latestUserMsg.text,
-          });
+          }), 3, 1000);
           const queryEmbedding = embedRes.embeddings?.[0]?.values || [];
           
           if (queryEmbedding.length > 0) {
@@ -211,8 +267,7 @@ async function startServer() {
         }
       }
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
+      const response = await generateContentWithRetryAndFallback({
         contents: history,
         config: {
           systemInstruction: dynamicInstruction,
